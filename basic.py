@@ -35,8 +35,27 @@ class IllegalCharError(Error):
 
 class RTError(Error):
     # Error for runtime errors. Note: naming this RuntimeError would conflict with Python's built-in RuntimeError.
-    def __init__(self,pos_start, pos_end, details=''):
+    def __init__(self,pos_start, pos_end, details, context):
         super().__init__(pos_start, pos_end, 'Runtime Error', details)
+        self.context = context
+
+    def as_string(self):
+        result = self.generate_traceback()
+        result += f'{self.error_name}: {self.details}'
+        result += '\n\n' + string_with_arrows(self.pos_start.file_text, self.pos_start, self.pos_end)
+        return result
+
+    def generate_traceback(self):
+        result = ''
+        pos = self.pos_start
+        ctx = self.context
+
+        while ctx:
+            result = f'  File {pos.file_name}, line {str(pos.line + 1)}, in {ctx.display_name}\n' + result
+            pos = ctx.parent_entry_pos
+            ctx = ctx.parent
+
+        return 'Traceback (most recent call last):\n' + result
 
 
 class InvalidSyntaxError(Error):
@@ -442,6 +461,7 @@ class Number:
     def __init__(self, value):
         self.value = value  # The numeric value.
         self.set_pos()
+        self.set_context()
 
     def set_pos(self, pos_start=None, pos_end=None):
         # Sets the position of this number in the source code.
@@ -449,27 +469,35 @@ class Number:
         self.pos_end = pos_end
         return self
 
+    def set_context(self, context=None):
+        self.context = context
+        return self
+
     def added_to(self, other):
         # Adds this number to another Number object.
         if isinstance(other, Number):
-            return Number(self.value + other.value), None
+            return Number(self.value + other.value).set_context(self.context), None
 
     def subbed_by(self, other):
         # Subtracts another Number object from this one.
         if isinstance(other, Number):
-            return Number(self.value - other.value), None
+            return Number(self.value - other.value).set_context(self.context), None
 
     def multiplied_by(self, other):
         # Multiplies this number by another Number object.
         if isinstance(other, Number):
-            return Number(self.value * other.value), None
+            return Number(self.value * other.value).set_context(self.context), None
 
     def divided_by(self, other):
         # Divides this number by another Number object.
         if isinstance(other, Number):
             if other.value == 0:
-                return None, RTError(other.pos_start, other.pos_end, 'Division by zero')
-            return Number(self.value / other.value), None
+                return None, RTError(
+                    other.pos_start, other.pos_end,
+                    'Division by zero',
+                    self.context
+                )
+            return Number(self.value / other.value).set_context(self.context), None
 
     def __repr__(self):
         # Representation of the number for debugging.
@@ -477,29 +505,41 @@ class Number:
 
 
 ##############################################
+# CONTEXT
+##############################################
+class Context:
+    def __init__(self, display_name, parent=None, parent_entry_pos=None):
+        self.display_name = display_name  # Name to display in error messages.
+        self.parent = parent  # Parent context.
+        self.parent_entry_pos = parent_entry_pos  # Entry position in the parent's code.
+
+
+##############################################
 # INTERPRETER
 ##############################################
 class Interpreter:
-    def visit(self, node):
+    def visit(self, node, context):
         # Dispatches node to the appropriate visit method.
         method_name = f'visit_{type(node).__name__}'
         method = getattr(self, method_name, self.no_visit_method)
-        return method(node)
+        return method(node, context)
 
-    def no_visit_method(self, node):
+    def no_visit_method(self, node, context):
         # Called if no visit method is defined for a node type.
         raise Exception(f'No visit_{type(node).__name__} method defined')
 
-    def visit_NumberNode(self, node):
-        return RTResult().success(Number(node.tok.value).set_pos(node.pos_start, node.pos_end))
+    def visit_NumberNode(self, node, context):
+        return RTResult().success(
+            Number(node.tok.value).set_context(context).set_pos(node.pos_start, node.pos_end)
+        )
         # Visits a NumberNode to produce a Number object.
 
-    def visit_BinOpNode(self, node):
+    def visit_BinOpNode(self, node, context):
         res = RTResult()
         # Visits a BinOpNode to perform the binary operation.
-        left = res.register(self.visit(node.left_node))
+        left = res.register(self.visit(node.left_node, context))
         if res.error: return res
-        right = res.register(self.visit(node.right_node))
+        right = res.register(self.visit(node.right_node, context))
         if res.error: return res
 
         if node.operator_token.type == TT_PLUS:
@@ -515,10 +555,10 @@ class Interpreter:
             return res.failure(error)
         return res.success(result.set_pos(node.pos_start, node.pos_end))
 
-    def visit_UnaryOpNode(self, node):
+    def visit_UnaryOpNode(self, node, context):
         res = RTResult()
         # Visits a UnaryOpNode to perform the unary operation.
-        number = res.register(self.visit(node.node))
+        number = res.register(self.visit(node.node, context))
         if res.error: return res
 
         error = None
@@ -544,9 +584,10 @@ def run(file_name, text):
     if ast.error: return None, ast.error  # Return early on syntax error.
 
     interpreter = Interpreter()  # Interpretation.
+    context = Context('<program>') # Create a context, this is for stack tracing in errors.
     #print the ast
     print(ast.node)
 
-    result = interpreter.visit(ast.node)
+    result = interpreter.visit(ast.node, context)
 
     return result.value, result.error
