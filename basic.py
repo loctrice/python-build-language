@@ -33,6 +33,12 @@ class IllegalCharError(Error):
         super().__init__(pos_start, pos_end, 'Illegal Character', details)
 
 
+class RTError(Error):
+    # Error for runtime errors. Note: naming this RuntimeError would conflict with Python's built-in RuntimeError.
+    def __init__(self,pos_start, pos_end, details=''):
+        super().__init__(pos_start, pos_end, 'Runtime Error', details)
+
+
 class InvalidSyntaxError(Error):
     # Error for syntax that doesn't match the expected patterns.
     def __init__(self,pos_start, pos_end, details=''):
@@ -406,6 +412,30 @@ class Parser:
 
 
 ##############################################
+# RUNTIME RESULT
+##############################################
+class RTResult:
+    def __init__(self):
+        self.value = None  # The value of the result.
+        self.error = None  # The error of the result.
+
+    def register(self, res):
+        # Register another result.
+        if res.error: self.error = res.error
+        return res.value
+
+    def success(self, value):
+        # Mark the result as successful.
+        self.value = value
+        return self
+
+    def failure(self, error):
+        # Mark the result as a failure.
+        self.error = error
+        return self
+
+
+##############################################
 # NUMBER
 ##############################################
 class Number:
@@ -422,23 +452,24 @@ class Number:
     def added_to(self, other):
         # Adds this number to another Number object.
         if isinstance(other, Number):
-            return Number(self.value + other.value)
+            return Number(self.value + other.value), None
 
     def subbed_by(self, other):
         # Subtracts another Number object from this one.
         if isinstance(other, Number):
-            return Number(self.value - other.value)
+            return Number(self.value - other.value), None
 
     def multiplied_by(self, other):
         # Multiplies this number by another Number object.
         if isinstance(other, Number):
-            return Number(self.value * other.value)
+            return Number(self.value * other.value), None
 
     def divided_by(self, other):
         # Divides this number by another Number object.
         if isinstance(other, Number):
-            if other.value == 0: return None  # Avoid division by zero.
-            return Number(self.value / other.value)
+            if other.value == 0:
+                return None, RTError(other.pos_start, other.pos_end, 'Division by zero')
+            return Number(self.value / other.value), None
 
     def __repr__(self):
         # Representation of the number for debugging.
@@ -460,33 +491,44 @@ class Interpreter:
         raise Exception(f'No visit_{type(node).__name__} method defined')
 
     def visit_NumberNode(self, node):
+        return RTResult().success(Number(node.tok.value).set_pos(node.pos_start, node.pos_end))
         # Visits a NumberNode to produce a Number object.
-        return Number(node.tok.value).set_pos(node.pos_start, node.pos_end)
 
     def visit_BinOpNode(self, node):
+        res = RTResult()
         # Visits a BinOpNode to perform the binary operation.
-        left = self.visit(node.left_node)
-        right = self.visit(node.right_node)
+        left = res.register(self.visit(node.left_node))
+        if res.error: return res
+        right = res.register(self.visit(node.right_node))
+        if res.error: return res
 
         if node.operator_token.type == TT_PLUS:
-            result = left.added_to(right)
+            result, error = left.added_to(right)
         elif node.operator_token.type == TT_MINUS:
-            result = left.subbed_by(right)
+            result, error = left.subbed_by(right)
         elif node.operator_token.type == TT_MUL:
-            result = left.multiplied_by(right)
+            result, error = left.multiplied_by(right)
         elif node.operator_token.type == TT_DIV:
-            result = left.divided_by(right)
+            result, error = left.divided_by(right)
 
-        return result.set_pos(node.pos_start, node.pos_end)
+        if error:
+            return res.failure(error)
+        return res.success(result.set_pos(node.pos_start, node.pos_end))
 
     def visit_UnaryOpNode(self, node):
+        res = RTResult()
         # Visits a UnaryOpNode to perform the unary operation.
-        number = self.visit(node.node)
+        number = res.register(self.visit(node.node))
+        if res.error: return res
 
+        error = None
         if node.operator_token.type == TT_MINUS:
-            number.value = -number.value
+            number, error = number.multiplied_by(Number(-1))
 
-        return number.set_pos(node.pos_start, node.pos_end)
+        if error:
+            return res.failure(error)
+        else:
+            return res.success(number.set_pos(node.pos_start, node.pos_end))
 
 
 ##############################################
@@ -507,4 +549,4 @@ def run(file_name, text):
 
     result = interpreter.visit(ast.node)
 
-    return result, ast.error
+    return result.value, result.error
